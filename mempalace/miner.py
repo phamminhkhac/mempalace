@@ -78,6 +78,9 @@ SKIP_FILENAMES = {
 CHUNK_SIZE = 800  # chars per drawer
 CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
+MAX_FILE_SIZE = 100_000  # skip files > 100KB (minified bundles, vendored libs)
+
+SKIP_SUFFIXES = {".min.js", ".min.css", ".min.mjs"}
 
 
 # =============================================================================
@@ -447,8 +450,9 @@ def add_drawer(
             metadatas=[metadata],
         )
         return True
-    except Exception:
-        raise
+    except Exception as e:
+        print(f"    ⚠ Skipped chunk {chunk_index} of {source_file}: {e}")
+        return False
 
 
 # =============================================================================
@@ -466,6 +470,18 @@ def process_file(
     dry_run: bool,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
+
+    # Skip oversized files (minified bundles, vendored libs)
+    try:
+        file_size = filepath.stat().st_size
+    except OSError:
+        return 0, None
+    if file_size > MAX_FILE_SIZE:
+        return 0, None
+
+    # Skip minified files
+    if any(filepath.name.lower().endswith(s) for s in SKIP_SUFFIXES):
+        return 0, None
 
     # Skip if already filed
     source_file = str(filepath)
