@@ -75,8 +75,8 @@ SKIP_FILENAMES = {
     "package-lock.json",
 }
 
-CHUNK_SIZE = 800  # chars per drawer
-CHUNK_OVERLAP = 100  # overlap between chunks
+CHUNK_SIZE = 2048  # chars per drawer (tuned for bge-m3 8192-token context)
+CHUNK_OVERLAP = 200  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
 
 SKIP_SUFFIXES = {".min.js", ".min.css", ".min.mjs"}
