@@ -66,14 +66,20 @@ _collection_cache = None
 
 def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
+    from .embeddings import get_collection as _get_col
+
     global _client_cache, _collection_cache
     try:
         if _client_cache is None:
             _client_cache = chromadb.PersistentClient(path=_config.palace_path)
         if create:
-            _collection_cache = _client_cache.get_or_create_collection(_config.collection_name)
+            _collection_cache = _get_col(
+                _client_cache, _config.collection_name, create=True, config=_config
+            )
         elif _collection_cache is None:
-            _collection_cache = _client_cache.get_collection(_config.collection_name)
+            _collection_cache = _get_col(
+                _client_cache, _config.collection_name, config=_config
+            )
         return _collection_cache
     except Exception:
         return None
@@ -788,24 +794,31 @@ def handle_request(request):
 
 
 def main():
+    from .embeddings import start_llama_server, stop_llama_server
+
     logger.info("MemPalace MCP Server starting...")
-    while True:
-        try:
-            line = sys.stdin.readline()
-            if not line:
+    start_llama_server(_config)
+
+    try:
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                request = json.loads(line)
+                response = handle_request(request)
+                if response is not None:
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
                 break
-            line = line.strip()
-            if not line:
-                continue
-            request = json.loads(line)
-            response = handle_request(request)
-            if response is not None:
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            logger.error(f"Server error: {e}")
+            except Exception as e:
+                logger.error(f"Server error: {e}")
+    finally:
+        stop_llama_server()
 
 
 if __name__ == "__main__":

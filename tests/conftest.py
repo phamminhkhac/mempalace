@@ -46,6 +46,13 @@ def _reset_mcp_cache():
             mcp_server._collection_cache = None
         except (ImportError, AttributeError):
             pass
+        try:
+            from mempalace import embeddings
+
+            embeddings._ef_cache = embeddings._UNSET
+            embeddings._ef_config_key = None
+        except (ImportError, AttributeError):
+            pass
 
     _clear_cache()
     yield

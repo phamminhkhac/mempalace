@@ -593,12 +593,92 @@ All commands accept `--palace <path>` to override the default location.
 
 ## Configuration
 
+### Embedding Providers
+
+MemPalace supports four embedding backends. The default uses ChromaDB's built-in ONNX model, but this can crash on Apple Silicon (ARM64). Switch to llama-cpp, Ollama, or Gemini for a stable alternative.
+
+| Provider | Model | Dimensions | API Key | Extra Install |
+|----------|-------|-----------|---------|---------------|
+| `default` | all-MiniLM-L6-v2 (ONNX) | 384 | No | None |
+| `llama-cpp` | bge-m3 | 1024 | No | [llama.cpp](https://github.com/ggml-org/llama.cpp) server |
+| `ollama` | bge-m3 | 1024 | No | [Ollama](https://ollama.com) running locally |
+| `gemini` | gemini-embedding-001 | 768 | Yes | `pip install mempalace[gemini]` |
+
+**llama.cpp (recommended for Apple Silicon)**
+
+The most reliable local option on macOS — runs bge-m3 on GPU (Metal) via llama.cpp.
+
+```bash
+# 1. Install llama.cpp and download bge-m3
+brew install llama.cpp
+ollama pull bge-m3      # downloads the GGUF model (~1.2GB)
+
+# 2. Set in ~/.mempalace/config.json
+{
+  "embed_provider": "llama-cpp",
+  "embed_model": "bge-m3"
+}
+```
+
+**That's it.** When used as an MCP server (Claude Code, Cursor, etc.), MemPalace automatically:
+- Starts `llama-server` when the MCP connection opens (project opens)
+- Finds the bge-m3 model from Ollama's cache (`~/.ollama/models/`)
+- Stops `llama-server` when the MCP connection closes (project closes)
+
+No manual server management needed. GPU memory is freed when you close the project.
+
+For manual use (CLI), start the server yourself:
+
+```bash
+llama-server --model ~/.ollama/models/blobs/sha256-... --embedding --port 8784
+export LLAMA_CPP_BASE_URL=http://localhost:8784
+mempalace mine ~/myproject
+```
+
+**Ollama**
+
+```bash
+# 1. Install and start Ollama (https://ollama.com)
+ollama pull bge-m3
+
+# 2. Set in ~/.mempalace/config.json
+{
+  "embed_provider": "ollama",
+  "embed_model": "bge-m3"
+}
+
+# Or via environment variable
+export MEMPALACE_EMBED_PROVIDER=ollama
+```
+
+> **Note:** Ollama 0.20.x may crash on macOS 26 (Tahoe) due to a Metal shader compilation bug. Use `llama-cpp` provider as a workaround until Ollama fixes this.
+
+**Gemini**
+
+```bash
+pip install mempalace[gemini]
+
+# Set in ~/.mempalace/config.json
+{
+  "embed_provider": "gemini",
+  "gemini_api_key": "your-key-here"
+}
+
+# Or via environment variable
+export MEMPALACE_EMBED_PROVIDER=gemini
+export GEMINI_API_KEY=your-key-here
+```
+
+> **Warning:** Switching embedding providers on an existing palace requires re-mining (`mempalace mine <dir>`) because embedding dimensions differ between providers. Delete the old palace first or use a new path.
+
 ### Global (`~/.mempalace/config.json`)
 
 ```json
 {
   "palace_path": "/custom/path/to/palace",
   "collection_name": "mempalace_drawers",
+  "embed_provider": "llama-cpp",
+  "embed_model": "bge-m3",
   "people_map": {"Kai": "KAI", "Priya": "PRI"}
 }
 ```
@@ -634,8 +714,9 @@ Plain text. Becomes Layer 0 — loaded every session.
 | `miner.py` | Project file ingest |
 | `convo_miner.py` | Conversation ingest — chunks by exchange pair |
 | `searcher.py` | Semantic search via ChromaDB |
+| `embeddings.py` | Pluggable embedding backends (default/llama-cpp/Ollama/Gemini) |
 | `layers.py` | 4-layer memory stack |
-| `dialect.py` | AAAK compression — 30x lossless |
+| `dialect.py` | AAAK compression (experimental lossy) |
 | `knowledge_graph.py` | Temporal entity-relationship graph (SQLite) |
 | `palace_graph.py` | Room-based navigation graph |
 | `onboarding.py` | Guided setup — generates AAAK bootstrap + wing config |
@@ -661,6 +742,7 @@ mempalace/
 │   ├── miner.py               ← project file ingest
 │   ├── convo_miner.py         ← conversation ingest
 │   ├── searcher.py            ← semantic search
+│   ├── embeddings.py          ← pluggable embedding backends
 │   ├── onboarding.py          ← guided setup
 │   └── ...                    ← see mempalace/README.md
 ├── benchmarks/                ← reproducible benchmark runners
@@ -679,7 +761,7 @@ mempalace/
 │   └── mcp_setup.md
 ├── tests/                     ← test suite (README)
 ├── assets/                    ← logo + brand assets
-└── pyproject.toml             ← package config (v3.0.0)
+└── pyproject.toml             ← package config (v3.0.14)
 ```
 
 ---
@@ -687,10 +769,13 @@ mempalace/
 ## Requirements
 
 - Python 3.9+
-- `chromadb>=0.4.0`
+- `chromadb>=0.5.0,<0.7`
 - `pyyaml>=6.0`
 
-No API key. No internet after install. Everything local.
+Optional extras:
+- `pip install mempalace[gemini]` — for Gemini embedding support
+
+No API key required (with llama-cpp, Ollama, or default provider). Everything local.
 
 ```bash
 pip install mempalace
@@ -707,7 +792,7 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
 MIT — see [LICENSE](LICENSE).
 
 <!-- Link Definitions -->
-[version-shield]: https://img.shields.io/badge/version-3.0.0-4dc9f6?style=flat-square&labelColor=0a0e14
+[version-shield]: https://img.shields.io/badge/version-3.0.14-4dc9f6?style=flat-square&labelColor=0a0e14
 [release-link]: https://github.com/milla-jovovich/mempalace/releases
 [python-shield]: https://img.shields.io/badge/python-3.9+-7dd8f8?style=flat-square&labelColor=0a0e14&logo=python&logoColor=7dd8f8
 [python-link]: https://www.python.org/

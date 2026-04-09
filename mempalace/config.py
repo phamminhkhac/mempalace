@@ -103,6 +103,33 @@ class MempalaceConfig:
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
 
     @property
+    def embed_provider(self) -> str:
+        """Embedding provider: 'default', 'ollama', 'llama-cpp', or 'gemini'."""
+        env_val = os.environ.get("MEMPALACE_EMBED_PROVIDER")
+        if env_val:
+            return env_val
+        return self._file_config.get("embed_provider", "default")
+
+    @property
+    def embed_model(self) -> str:
+        """Embedding model name (provider-specific)."""
+        env_val = os.environ.get("MEMPALACE_EMBED_MODEL")
+        if env_val:
+            return env_val
+        defaults = {
+            "gemini": "gemini-embedding-001",
+            "ollama": "bge-m3",
+            "llama-cpp": "bge-m3",
+            "default": "",
+        }
+        return self._file_config.get("embed_model", defaults.get(self.embed_provider, ""))
+
+    @property
+    def gemini_api_key(self) -> str:
+        """Gemini API key for embedding."""
+        return os.environ.get("GEMINI_API_KEY", "") or self._file_config.get("gemini_api_key", "")
+
+    @property
     def people_map(self):
         """Mapping of name variants to canonical names."""
         if self._people_map_file.exists():
@@ -130,6 +157,7 @@ class MempalaceConfig:
             default_config = {
                 "palace_path": DEFAULT_PALACE_PATH,
                 "collection_name": DEFAULT_COLLECTION_NAME,
+                "embed_provider": "default",
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
             }

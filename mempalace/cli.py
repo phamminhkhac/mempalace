@@ -171,10 +171,12 @@ def cmd_repair(args):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
+    from .embeddings import get_collection as _get_col
+
     # Try to read existing drawers
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = _get_col(client, "mempalace_drawers")
         total = col.count()
         print(f"  Drawers found: {total}")
     except Exception as e:
@@ -244,6 +246,7 @@ def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
     import chromadb
     from .dialect import Dialect
+    from .embeddings import get_collection as _get_col
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
@@ -264,7 +267,7 @@ def cmd_compress(args):
     # Connect to palace
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = _get_col(client, "mempalace_drawers")
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -335,7 +338,7 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = client.get_or_create_collection("mempalace_compressed")
+            comp_col = _get_col(client, "mempalace_compressed", create=True)
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)
