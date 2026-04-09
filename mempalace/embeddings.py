@@ -76,8 +76,12 @@ class LlamaCppEmbeddingFunction(EmbeddingFunction[Documents]):
         self._model = model
         self._base_url = base_url.rstrip("/")
 
+    # bge-m3 context is 8192 tokens; ~4 chars/token → truncate at ~30k chars
+    MAX_CHARS = 30_000
+
     def __call__(self, input: Documents) -> Embeddings:
-        payload = json.dumps({"input": input, "model": self._model}).encode()
+        truncated = [doc[:self.MAX_CHARS] if len(doc) > self.MAX_CHARS else doc for doc in input]
+        payload = json.dumps({"input": truncated, "model": self._model}).encode()
         req = urllib.request.Request(
             f"{self._base_url}/v1/embeddings",
             data=payload,
@@ -86,6 +90,24 @@ class LlamaCppEmbeddingFunction(EmbeddingFunction[Documents]):
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read())
+        except urllib.error.HTTPError:
+            # Server returned 500 (e.g. input still too large) — retry with
+            # aggressive truncation to avoid crashing llama-server.
+            shorter = [doc[:8_000] for doc in truncated]
+            payload2 = json.dumps({"input": shorter, "model": self._model}).encode()
+            req2 = urllib.request.Request(
+                f"{self._base_url}/v1/embeddings",
+                data=payload2,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req2, timeout=120) as resp2:
+                    data = json.loads(resp2.read())
+            except urllib.error.URLError as exc:
+                raise ConnectionError(
+                    f"Cannot connect to llama.cpp server at {self._base_url}\n"
+                    f"Start with: llama-server --model <gguf-file> --embedding --port 8080 --n-gpu-layers 0"
+                ) from exc
         except urllib.error.URLError as exc:
             raise ConnectionError(
                 f"Cannot connect to llama.cpp server at {self._base_url}\n"
@@ -274,7 +296,11 @@ def start_llama_server(config: Optional[MempalaceConfig] = None, port: int = 0) 
 
     logger.info("Starting llama-server on port %d (model: %s)...", port, os.path.basename(model_path))
     _llama_proc = subprocess.Popen(
-        [llama_bin, "--model", model_path, "--embedding", "--port", str(port)],
+        [
+            llama_bin, "--model", model_path, "--embedding",
+            "--port", str(port),
+            "--batch-size", "8192", "--ubatch-size", "8192",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
