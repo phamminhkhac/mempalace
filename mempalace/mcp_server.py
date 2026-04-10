@@ -44,6 +44,11 @@ def _parse_args():
         metavar="PATH",
         help="Path to the palace directory (overrides config file and env var)",
     )
+    parser.add_argument(
+        "--project",
+        metavar="PATH",
+        help="Project directory to auto-mine on connect (must contain mempalace.yaml)",
+    )
     args, _ = parser.parse_known_args()
     return args
 
@@ -52,6 +57,12 @@ _args = _parse_args()
 
 if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
+
+_project_dir = None
+if _args.project:
+    _project_dir = os.path.abspath(_args.project)
+elif os.environ.get("MEMPALACE_PROJECT_DIR"):
+    _project_dir = os.path.abspath(os.environ["MEMPALACE_PROJECT_DIR"])
 
 _config = MempalaceConfig()
 if _args.palace:
@@ -720,7 +731,58 @@ TOOLS = {
         },
         "handler": tool_diary_read,
     },
+    "mempalace_mine": {
+        "description": (
+            "Mine a project directory into the palace. "
+            "Reads mempalace.yaml from the directory, scans files, "
+            "chunks and stores them as drawers. Incremental — skips unchanged files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the project directory (must contain mempalace.yaml)",
+                },
+                "wing": {
+                    "type": "string",
+                    "description": "Override wing name (default: from mempalace.yaml)",
+                },
+            },
+            "required": ["project_dir"],
+        },
+        "handler": lambda **kw: _tool_mine(**kw),
+    },
 }
+
+
+def _tool_mine(project_dir: str, wing: str = None) -> dict:
+    """MCP tool handler for mining a project."""
+    from .miner import mine_quiet
+
+    project_dir = os.path.expanduser(project_dir)
+    if not os.path.isdir(project_dir):
+        return {"error": f"Directory not found: {project_dir}"}
+
+    config_path = os.path.join(project_dir, "mempalace.yaml")
+    if not os.path.exists(config_path):
+        legacy = os.path.join(project_dir, "mempal.yaml")
+        if not os.path.exists(legacy):
+            return {"error": f"No mempalace.yaml found in {project_dir}"}
+
+    try:
+        output = mine_quiet(
+            project_dir=project_dir,
+            palace_path=_config.palace_path,
+            wing_override=wing,
+            agent="mcp",
+        )
+        # Reset collection cache so new drawers are visible
+        global _collection_cache
+        _collection_cache = None
+        return {"status": "ok", "project_dir": project_dir, "output": output}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def handle_request(request):
@@ -793,11 +855,40 @@ def handle_request(request):
     }
 
 
+def _auto_mine_background():
+    """Incremental mine of --project directory in a background thread."""
+    if not _project_dir:
+        return
+    config_path = os.path.join(_project_dir, "mempalace.yaml")
+    legacy_path = os.path.join(_project_dir, "mempal.yaml")
+    if not os.path.exists(config_path) and not os.path.exists(legacy_path):
+        logger.info("No mempalace.yaml in %s — skipping auto-mine", _project_dir)
+        return
+
+    import threading
+    from .miner import mine_quiet
+
+    def _run():
+        try:
+            logger.info("Auto-mining %s...", _project_dir)
+            mine_quiet(_project_dir, _config.palace_path, agent="auto-mine")
+            # Reset collection cache so new drawers are visible
+            global _collection_cache
+            _collection_cache = None
+            logger.info("Auto-mine complete: %s", _project_dir)
+        except Exception as e:
+            logger.error("Auto-mine failed: %s", e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
 def main():
     from .embeddings import start_llama_server, stop_llama_server
 
     logger.info("MemPalace MCP Server starting...")
     start_llama_server(_config)
+    _auto_mine_background()
 
     try:
         while True:

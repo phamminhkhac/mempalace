@@ -658,6 +658,27 @@ def mine(
     print(f"{'=' * 55}\n")
 
 
+def mine_quiet(
+    project_dir: str,
+    palace_path: str,
+    wing_override: str = None,
+    agent: str = "mempalace",
+) -> str:
+    """Run mine() and capture stdout (safe for MCP context where stdout is JSON-RPC)."""
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mine(
+            project_dir=project_dir,
+            palace_path=palace_path,
+            wing_override=wing_override,
+            agent=agent,
+        )
+    return buf.getvalue()
+
+
 # =============================================================================
 # STATUS
 # =============================================================================

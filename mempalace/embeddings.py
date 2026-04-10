@@ -210,19 +210,29 @@ def get_collection(
     if ef is not None:
         kwargs["embedding_function"] = ef
     if create:
+        kwargs["metadata"] = {"hnsw:space": "cosine"}
         return client.get_or_create_collection(**kwargs)
     return client.get_collection(**kwargs)
 
 
 # ---------------------------------------------------------------------------
-# llama-server process manager — auto start/stop with MCP lifecycle
+# llama-server process manager — shared across MCP instances via ref-counting
+#
+# State directory: ~/.mempalace/llama-server/
+#   pid        — PID of the shared llama-server process
+#   refs/      — one file per MCP client process (filename = client PID)
+#
+# Start: register ref, spawn server if not already running
+# Stop:  unregister ref, kill server only when no refs remain
 # ---------------------------------------------------------------------------
 
-_llama_proc: Optional[subprocess.Popen] = None
+_LLAMA_DIR = os.path.expanduser("~/.mempalace/llama-server")
+_LLAMA_PID_FILE = os.path.join(_LLAMA_DIR, "pid")
+_LLAMA_REFS_DIR = os.path.join(_LLAMA_DIR, "refs")
 _atexit_registered: bool = False
 
 
-def _find_model_path(config: Optional[MempalaceConfig] = None) -> Optional[str]:
+def _find_model_path() -> Optional[str]:
     """Find the bge-m3 GGUF file from Ollama's cache."""
     manifest = os.path.expanduser(
         "~/.ollama/models/manifests/registry.ollama.ai/library/bge-m3/latest"
@@ -253,49 +263,108 @@ def _is_server_ready(base_url: str, timeout: float = 1.0) -> bool:
         return False
 
 
-def start_llama_server(config: Optional[MempalaceConfig] = None, port: int = 0) -> Optional[str]:
-    """Start a llama-server subprocess if llama-cpp provider is configured.
+def _pid_alive(pid: int) -> bool:
+    """Check if a process is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
-    Returns the base_url if started, or None if not needed / already running.
-    The process is killed automatically on interpreter exit (atexit + signal).
+
+def _read_server_pid() -> Optional[int]:
+    """Read the shared server PID from disk, return None if stale or missing."""
+    try:
+        with open(_LLAMA_PID_FILE) as f:
+            pid = int(f.read().strip())
+        if _pid_alive(pid):
+            return pid
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return None
+
+
+def _register_ref():
+    """Register this process as a client of the shared llama-server."""
+    os.makedirs(_LLAMA_REFS_DIR, exist_ok=True)
+    ref_file = os.path.join(_LLAMA_REFS_DIR, str(os.getpid()))
+    with open(ref_file, "w") as f:
+        f.write("")
+
+
+def _unregister_ref():
+    """Unregister this process. Returns number of remaining live refs."""
+    my_ref = os.path.join(_LLAMA_REFS_DIR, str(os.getpid()))
+    try:
+        os.unlink(my_ref)
+    except FileNotFoundError:
+        pass
+    # Count remaining refs (only those with alive PIDs)
+    remaining = 0
+    try:
+        for name in os.listdir(_LLAMA_REFS_DIR):
+            try:
+                pid = int(name)
+                if _pid_alive(pid):
+                    remaining += 1
+                else:
+                    # Clean up stale ref
+                    os.unlink(os.path.join(_LLAMA_REFS_DIR, name))
+            except (ValueError, OSError):
+                pass
+    except FileNotFoundError:
+        pass
+    return remaining
+
+
+def start_llama_server(config: Optional[MempalaceConfig] = None, port: int = 0) -> Optional[str]:
+    """Start or attach to a shared llama-server.
+
+    Multiple MCP processes share one server via ref-counting.
+    The server is only started if no existing instance is running.
     """
-    global _llama_proc, _atexit_registered
+    global _atexit_registered
     config = config or MempalaceConfig()
 
     if config.embed_provider != "llama-cpp":
         return None
 
-    base_url = os.environ.get("LLAMA_CPP_BASE_URL", "")
-    if base_url and _is_server_ready(base_url):
-        logger.info("llama-server already running at %s", base_url)
-        return base_url
-
-    if _llama_proc is not None and _llama_proc.poll() is None:
-        return os.environ.get("LLAMA_CPP_BASE_URL", "http://localhost:8080")
-
-    llama_bin = shutil.which("llama-server")
-    if not llama_bin:
-        logger.warning("llama-server not found in PATH — install with: brew install llama.cpp")
-        return None
-
-    model_path = os.environ.get("LLAMA_CPP_MODEL") or _find_model_path(config)
-    if not model_path:
-        logger.warning(
-            "No bge-m3 GGUF found. Run: ollama pull bge-m3  (to download the model)"
-        )
-        return None
-
     if port == 0:
         port = int(os.environ.get("LLAMA_CPP_PORT", "8784"))
+    base_url = os.environ.get("LLAMA_CPP_BASE_URL", f"http://localhost:{port}")
 
-    base_url = f"http://localhost:{port}"
+    # Register this process as a client
+    _register_ref()
+    if not _atexit_registered:
+        atexit.register(stop_llama_server)
+        _atexit_registered = True
+
+    # Check if server is already running (started by another MCP or manually)
     if _is_server_ready(base_url):
         os.environ["LLAMA_CPP_BASE_URL"] = base_url
         logger.info("llama-server already running at %s", base_url)
         return base_url
 
+    # Check PID file for a process we previously started
+    existing_pid = _read_server_pid()
+    if existing_pid and _is_server_ready(base_url):
+        os.environ["LLAMA_CPP_BASE_URL"] = base_url
+        logger.info("llama-server already running at %s (pid %d)", base_url, existing_pid)
+        return base_url
+
+    # Need to start a new server
+    llama_bin = shutil.which("llama-server")
+    if not llama_bin:
+        logger.warning("llama-server not found in PATH — install with: brew install llama.cpp")
+        return None
+
+    model_path = os.environ.get("LLAMA_CPP_MODEL") or _find_model_path()
+    if not model_path:
+        logger.warning("No bge-m3 GGUF found. Run: ollama pull bge-m3")
+        return None
+
     logger.info("Starting llama-server on port %d (model: %s)...", port, os.path.basename(model_path))
-    _llama_proc = subprocess.Popen(
+    proc = subprocess.Popen(
         [
             llama_bin, "--model", model_path, "--embedding",
             "--port", str(port),
@@ -304,35 +373,45 @@ def start_llama_server(config: Optional[MempalaceConfig] = None, port: int = 0) 
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    if not _atexit_registered:
-        atexit.register(stop_llama_server)
-        _atexit_registered = True
 
-    # Wait for server to become ready (max 30s for model load)
+    # Write PID file
+    os.makedirs(_LLAMA_DIR, exist_ok=True)
+    with open(_LLAMA_PID_FILE, "w") as f:
+        f.write(str(proc.pid))
+
+    # Wait for server to become ready (max 30s)
     for _ in range(60):
-        if _llama_proc.poll() is not None:
-            logger.error("llama-server exited with code %d", _llama_proc.returncode)
-            _llama_proc = None
+        if proc.poll() is not None:
+            logger.error("llama-server exited with code %d", proc.returncode)
             return None
         if _is_server_ready(base_url):
             os.environ["LLAMA_CPP_BASE_URL"] = base_url
-            logger.info("llama-server ready at %s (pid %d)", base_url, _llama_proc.pid)
+            logger.info("llama-server ready at %s (pid %d)", base_url, proc.pid)
             return base_url
         time.sleep(0.5)
 
     logger.error("llama-server failed to start within 30s")
-    stop_llama_server()
+    proc.kill()
     return None
 
 
 def stop_llama_server():
-    """Kill the managed llama-server subprocess."""
-    global _llama_proc
-    if _llama_proc is not None and _llama_proc.poll() is None:
-        logger.info("Stopping llama-server (pid %d)...", _llama_proc.pid)
-        _llama_proc.terminate()
+    """Unregister this client. Kill the server only when no clients remain."""
+    remaining = _unregister_ref()
+    if remaining > 0:
+        logger.info("Unregistered from llama-server (%d clients still active)", remaining)
+        return
+
+    # No clients left — kill the server
+    pid = _read_server_pid()
+    if pid:
+        logger.info("No clients left, stopping llama-server (pid %d)...", pid)
         try:
-            _llama_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _llama_proc.kill()
-    _llama_proc = None
+            os.kill(pid, 15)  # SIGTERM
+        except OSError:
+            pass
+    # Clean up state
+    try:
+        os.unlink(_LLAMA_PID_FILE)
+    except FileNotFoundError:
+        pass
